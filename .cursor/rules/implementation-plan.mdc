@@ -1,0 +1,20 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Implementation Plan Overview
+
+The implementation plan for the Maya Protocol Arbitrage Bot is detailed in [Docs/Implementation Plan.md](mdc:Docs/Implementation%20Plan.md). Key points include:
+
+- **Technology Stack**: TypeScript/Node.js, xchain-mayachain-amm, Uniswap V3 SDK, Axios, Vultisig SDK.
+- **Development Phases**:
+  1. Project setup and SDK/API integration
+  2. Data fetching and price calculation
+  3. Trade simulation (Maya & Uniswap)
+  4. Trade execution (with Vultisig)
+  5. Logging and monitoring
+- **Testing Plan**: Unit, integration, and scenario testing using Maya stagenet and Arbitrum testnet. Emphasizes edge cases and reliability.
+- **Deployment & Risk Management**: Secure server setup, key management, monitoring, and risk mitigation strategies.
+
+Refer to the full [Implementation Plan](mdc:Docs/Implementation%20Plan.md) for details on each phase and best practices.

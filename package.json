@@ -1,0 +1,55 @@
+{
+  "name": "mayarbot",
+  "version": "1.0.0",
+  "description": "Maya Protocol Arbitrage Bot",
+  "main": "dist/index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "test": "jest",
+    "lint": "eslint . --ext .ts",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\""
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atebites-hub/mayarbot.git"
+  },
+  "keywords": [
+    "maya",
+    "arbitrage",
+    "bot",
+    "uniswap",
+    "crypto"
+  ],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/atebites-hub/mayarbot/issues"
+  },
+  "homepage": "https://github.com/atebites-hub/mayarbot#readme",
+  "dependencies": {
+    "@types/node": "^22.15.18",
+    "@uniswap/sdk-core": "^7.7.2",
+    "@uniswap/v3-sdk": "^3.25.2",
+    "axios": "^1.9.0",
+    "dotenv": "^16.5.0",
+    "ethers": "^5.8.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@typescript-eslint/eslint-plugin": "^8.32.1",
+    "@typescript-eslint/parser": "^8.32.1",
+    "eslint": "^9.26.0",
+    "eslint-config-prettier": "^10.1.5",
+    "eslint-plugin-prettier": "^5.4.0",
+    "jest": "^29.7.0",
+    "prettier": "^3.5.3",
+    "ts-jest": "^29.3.3"
+  }
+}

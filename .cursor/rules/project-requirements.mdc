@@ -1,0 +1,23 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Project Requirements Overview
+
+The requirements for the Maya Protocol Arbitrage Bot are specified in [Docs/Project Requirements.md](mdc:Docs/Project%20Requirements.md). Key points include:
+
+- **Functional Requirements**:
+  - Vultisig SDK wallet integration (Maya & Arbitrum)
+  - Fetch pool data from Maya Midgard API and Uniswap V3 subgraph
+  - Price comparison, trading status checks, and trade simulation
+  - Execute arbitrage trades if profitable, with logging and auditing
+- **Non-Functional Requirements**:
+  - Low-latency, efficient, and secure operation
+  - Modular, maintainable, and scalable codebase
+  - Robust error handling and retry logic
+- **Assumptions & Constraints**:
+  - Assumes real-time data and sufficient wallet funds
+  - Must handle network latency, API rate limits, gas fees, and slippage
+
+See the full [Project Requirements](mdc:Docs/Project%20Requirements.md) for detailed requirements and context.
