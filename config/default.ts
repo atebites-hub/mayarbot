@@ -8,16 +8,15 @@ const config = {
     midgardApiUrl: process.env.MAYA_MIDGARD_API_URL || 'https://midgard.mayachain.info/v2',
     nodeApiUrl: process.env.MAYA_NODE_API_URL || 'https://mayanode.mayachain.info/mayachain',
     stagenetMidgardApiUrl:
-      process.env.MAYA_STAGENET_MIDGARD_API_URL || 'https://stagenet-midgard.ninerealms.com/v2',
+      process.env.MAYA_STAGENET_MIDGARD_API_URL || 'https://stagenet.midgard.mayachain.info/v2',
     stagenetNodeApiUrl:
-      process.env.MAYA_STAGENET_NODE_API_URL || 'https://stagenet-maya.ninerealms.com/mayachain',
+      process.env.MAYA_STAGENET_NODE_API_URL || 'https://stagenet.mayanode.mayachain.info/mayachain',
     useStageNet: process.env.USE_STAGENET === 'true',
   },
   arbitrum: {
     rpcUrl: process.env.ARBITRUM_RPC_URL || 'https://arbitrum-goerli.publicnode.com',
-    uniswapSubgraphUrl:
-      process.env.UNISWAP_SUBGRAPH_URL ||
-      'https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3-arbitrum-goerli',
+    uniswapSubgraphId:
+      process.env.UNISWAP_SUBGRAPH_ID || 'FQ6JYszEKApsBpAmiHesRsd9Ygc6mzmpNRANeVQFYoVX', // Uniswap V3 Arbitrum One
   },
   vultisig: {
     apiKey: process.env.VULTISIG_API_KEY || '',
@@ -31,6 +30,9 @@ const config = {
   logging: {
     level: process.env.LOG_LEVEL || 'info',
     filePath: process.env.LOG_FILE_PATH || './logs',
+  },
+  graph: {
+    apiKey: process.env.GRAPH_API_KEY || '',
   },
 };
 

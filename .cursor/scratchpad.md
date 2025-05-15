@@ -185,7 +185,7 @@ The core logic involves:
 *   [x] Task 5.2: Logging, Monitoring, and Alerting
 *   [ ] Task 5.3: Comprehensive Testing (Unit, Integration, Scenario)
 *   [ ] Task 5.4: Security Review and Hardening
-*   [ ] Task 5.5: Code Refinement and Documentation
+*   [x] Task 5.5: Code Refinement and Documentation - Updated README.md
 
 **Phase 6: Mainnet Preparation and Deployment**
 *   [ ] Task 6.1: Mainnet Configuration and Simulation-Only Mode
@@ -211,10 +211,29 @@ Next steps:
 3. Implement proper asset-to-chain mapping for Maya Protocol
 4. Begin implementing trade simulation for both platforms
 
+### 2025-05-15 Bot Re-run after Endpoint Fixes (Executor)
+
+* Maya Stagenet endpoints now connect successfully.
+* Uniswap subgraph endpoint (`uniswap-v3-arbitrum-goerli`) returns GraphQL error: "This endpoint has been removed." → need new subgraph URL for Arbitrum testnet or switch to new chain/network.
+* Maya inbound addresses fetched, but chain symbol mapping for USDC still fails (`Chain USDC not found in inbound addresses`). Need asset→chain map or handle ERC20 CACAO.
+
+Suggested next tasks:
+1. Find current Uniswap V3 Arbitrum Goerli (or Sepolia) subgraph URL, update config.
+2. Improve chain mapping in `MayaService.isChainHalted` to map ARB and ERC20 symbols to chain names.
+
+Awaiting Planner guidance or proceed to implement.
+
+### README Update (Executor) - 2025-05-16
+The `README.md` has been updated with comprehensive information about the project, including setup, how it works, technology stack, testing, and risk disclaimers. Please review the updated `README.md`.
+
 ## 6. Lessons
 *(To be filled as lessons are learned during development)*
 *   Consider using `ethers.js` version 5 if Uniswap V3 SDK examples are based on it, or ensure compatibility with v6.
 *   `xchain-mayachain-amm` will be key for Maya simulations. Ensure its API is well understood.
 *   Vultisig SDK documentation needs to be thoroughly reviewed for transaction signing and broadcasting capabilities on both Maya and EVM chains (Arbitrum).
 *   Pay close attention to rate limits for Midgard API, Mayanode endpoints, and The Graph subgraphs.
-*   When mocking services in tests, use `as unknown as ServiceType` pattern for partial mocks and add type assertions for mock functions. 
+*   When mocking services in tests, use `as unknown as ServiceType` pattern for partial mocks and add type assertions for mock functions.
+*   Public Stagenet endpoints differ from NineRealms demo domains. Use `*.mayachain.info` for Midgard & MAYANode.
+*   Always safe-check optional fields when parsing The Graph responses – failure to do so will crash the bot.
+
+NOTE: The Graph now requires authenticated Gateway requests. Users must obtain a free API key (`GRAPH_API_KEY`) from https://thegraph.com (dashboard) and set it in `.env`. Unauthenticated fallback will fail with `deployment ... does not exist`. 

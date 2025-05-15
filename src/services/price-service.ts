@@ -110,8 +110,13 @@ export class PriceService {
    * @returns Chain name
    */
   private getChainFromAsset(asset: string): string {
-    // For simple assets, the chain is usually the same as the asset
-    // In a real implementation, this would be more sophisticated
-    return asset;
+    const map: Record<string, string> = {
+      // Maya chain symbols
+      ARB: 'ARB',
+      USDC: 'ETH', // USDC.e is an ERC-20 on Ethereum side
+      'USDC.E': 'ETH',
+    };
+
+    return map[asset.toUpperCase()] || asset;
   }
 } 

@@ -32,25 +32,38 @@ export class MayaService {
    * @returns Pool data
    */
   async getPool(asset: string): Promise<MayaPool> {
-    try {
-      this.logger.debug(`Fetching pool data for ${asset}`);
-      const response = await axios.get(`${this.midgardUrl}/pool/${asset}`);
-      
-      // Parse and convert relevant data
-      const poolData = response.data;
-      const cacaoPrice = await this.getCacaoUsdPrice();
-      
-      // Calculate asset price in USD by multiplying the asset price in CACAO with the CACAO/USD price
-      const assetPriceUSD = parseFloat(poolData.assetPrice) * cacaoPrice;
-      
-      return {
-        ...poolData,
-        assetPriceUSD,
-      };
-    } catch (error) {
-      this.logger.error(`Failed to fetch pool data for ${asset}: ${error instanceof Error ? error.message : String(error)}`);
-      throw new Error(`Failed to fetch Maya pool data for ${asset}`);
+    const maxRetries = 3;
+    let attempt = 0;
+    while (attempt < maxRetries) {
+      try {
+        this.logger.debug(`Fetching pool data for ${asset} (attempt ${attempt + 1})`);
+        const response = await axios.get(`${this.midgardUrl}/pool/${asset}`);
+        
+        // Parse and convert relevant data
+        const poolData = response.data;
+        const cacaoPrice = await this.getCacaoUsdPrice();
+        
+        // Calculate asset price in USD by multiplying the asset price in CACAO with the CACAO/USD price
+        const assetPriceUSD = parseFloat(poolData.assetPrice) * cacaoPrice;
+        
+        return {
+          ...poolData,
+          assetPriceUSD,
+        };
+      } catch (error: any) {
+        if (error.response && error.response.status === 503) {
+          attempt += 1;
+          this.logger.warn(`Midgard 503 for ${asset}. Retrying (${attempt}/${maxRetries})...`);
+          await new Promise((res) => setTimeout(res, 500 * attempt));
+          continue;
+        }
+        this.logger.error(
+          `Failed to fetch pool data for ${asset}: ${error instanceof Error ? error.message : String(error)}`
+        );
+        throw new Error(`Failed to fetch Maya pool data for ${asset}`);
+      }
     }
+    throw new Error(`Failed to fetch Maya pool data for ${asset} after ${maxRetries} retries`);
   }
 
   /**
