@@ -10,7 +10,8 @@ import { Logger } from '../utils/logger';
 
 const ARBITRUM_ONE_CHAIN_ID = 42161;
 const UNISWAP_V3_FACTORY_ADDRESS_ARBITRUM = '0x1F98431c8aD98523631AE4a59f267346ea31F984';
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes for tick data cache
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes for tick data cache - This will be less relevant with proactive updates
+const DEFAULT_BACKGROUND_UPDATE_INTERVAL_MS = 60 * 1000; // 1 minute
 
 // Helper to get tick spacing from FeeAmount
 function feeToTickSpacing(feeAmount: FeeAmount): number {
@@ -28,6 +29,11 @@ export class UniswapService {
   private readonly logger: Logger;
   private multicallProvider: MulticallProvider | null = null;
   private tickCache = new Map<string, { data: Tick[], timestamp: number }>();
+  private isBackgroundUpdaterRunning = false;
+  private backgroundUpdaterAbortController: AbortController | null = null;
+
+  // Target pool for background updates - can be expanded later
+  private poolsToUpdateInBackground: Array<{address: string, fee: FeeAmount, tickSpacing: number}> = [];
 
   constructor(logger: Logger) {
     this.logger = logger;
@@ -35,8 +41,8 @@ export class UniswapService {
     this.logger.info(
       `Initialized Uniswap Service with SDK V3. RPC: ${config.arbitrum.rpcUrl}`,
     );
-    // Initialize multicall provider once
     this._initializeMulticallProvider();
+    this._configurePoolsToUpdate(); // New method to setup target pools
   }
 
   private async _initializeMulticallProvider() {
@@ -54,6 +60,25 @@ export class UniswapService {
             this.logger.error(`Failed to initialize MulticallProvider: ${error.message}`, error.stack);
             this.multicallProvider = null; // Ensure it's null if init fails
         }
+    }
+  }
+
+  private _configurePoolsToUpdate() {
+    // For now, hardcode the USDC/USDT 0.01% pool
+    // In a real app, this might come from config or dynamic discovery
+    const usdcToken = this.getToken('USDC');
+    const usdtToken = this.getToken('USDT');
+    const targetFee = FeeAmount.LOWEST;
+    try {
+        const poolAddress = Pool.getAddress(usdcToken, usdtToken, targetFee, undefined, UNISWAP_V3_FACTORY_ADDRESS_ARBITRUM);
+        this.poolsToUpdateInBackground.push({
+            address: poolAddress,
+            fee: targetFee,
+            tickSpacing: feeToTickSpacing(targetFee)
+        });
+        this.logger.info(`Configured background updates for pool: ${poolAddress} (USDC/USDT LOWEST Fee)`);
+    } catch(error: any) {
+        this.logger.error(`Failed to configure background update pool: ${error.message}`);
     }
   }
 
@@ -110,67 +135,41 @@ export class UniswapService {
     return compressed >> 8; // Divide by 256 (shift right by 8 bits)
   }
 
-  /**
-   * Fetches all initialized ticks for a given pool.
-   * TODO: Optimize with multicall for fetching bitmaps and tick data.
-   */
-  private async _fetchAllInitializedTicks(
-    poolAddress: string, 
-    tickSpacing: number,
-    feeForLogging: FeeAmount
-  ): Promise<Tick[]> {
-    // Cache key is simply the pool address as it's unique per fee tier due to how it's computed
-    const cacheKey = poolAddress;
-    const cachedEntry = this.tickCache.get(cacheKey);
-    if (cachedEntry && (Date.now() - cachedEntry.timestamp < CACHE_TTL_MS)) {
-        this.logger.info(`Pool ${poolAddress} | Fee ${FeeAmount[feeForLogging]} | Cache HIT for tick data. Age: ${((Date.now() - cachedEntry.timestamp)/1000).toFixed(1)}s.`);
-        return cachedEntry.data;
-    }
-    if (cachedEntry) {
-        this.logger.info(`Pool ${poolAddress} | Fee ${FeeAmount[feeForLogging]} | Cache STALE for tick data. Re-fetching. Age: ${((Date.now() - cachedEntry.timestamp)/1000).toFixed(1)}s.`);
-    } else {
-        this.logger.info(`Pool ${poolAddress} | Fee ${FeeAmount[feeForLogging]} | Cache MISS for tick data. Fetching...`);
-    }
-
-    this.logger.info(`Pool ${poolAddress} | Fee ${FeeAmount[feeForLogging]} | Fetching ALL initialized ticks using batched multicall...`);
-    
-    if (!this.multicallProvider) {
-        this.logger.warn('MulticallProvider is not initialized. Attempting to re-initialize for _fetchAllInitializedTicks.');
-        await this._initializeMulticallProvider();
-        if (!this.multicallProvider) {
-             this.logger.error('MulticallProvider re-initialization failed. Aborting tick fetch for this pool/fee.');
-             return [];
-        }
-    }
-
-    const multicallPoolContract = new MulticallContract(poolAddress, IUniswapV3PoolABI.abi as any);
-    const allInitializedTicks: Tick[] = [];
-    const minWord = this._tickToWord(TickMath.MIN_TICK, tickSpacing);
-    const maxWord = this._tickToWord(TickMath.MAX_TICK, tickSpacing);
-    const tickIndicesToFetch: number[] = [];
-    const BATCH_SIZE = 700; // Optimal batch size from optimizer script
-
-    this.logger.debug(`Pool ${poolAddress} | Fee ${FeeAmount[feeForLogging]} | Word range for bitmaps: ${minWord} to ${maxWord}. Batch size: ${BATCH_SIZE}`);
-
-    // Batch fetch bitmaps
-    let allBitmapResults: ethers.utils.Result[] = [];
-    const wordPositions: number[] = [];
-    for (let i = minWord; i <= maxWord; i++) {
-        wordPositions.push(i);
-    }
-
+  // Method to fetch and cache ticks for a specific pool - to be used by background worker
+  private async _refreshTickDataForPool(poolAddress: string, tickSpacing: number, feeForLogging: FeeAmount): Promise<void> {
+    this.logger.info(`Background Updater: Refreshing tick data for pool ${poolAddress} | Fee ${FeeAmount[feeForLogging]}`);
     try {
+        // This internal method will do the actual fetching logic (bitmaps, then ticks)
+        // It's essentially the core of the old _fetchAllInitializedTicks but without the cache read part,
+        // and it directly updates the cache.
+        // For simplicity in this refactor, we'll reuse parts of the existing _fetchAllInitializedTicks logic
+        // but ensure it updates the cache.
+
+        if (!this.multicallProvider) {
+            await this._initializeMulticallProvider();
+            if (!this.multicallProvider) {
+                this.logger.error(`Background Updater: MulticallProvider not available for ${poolAddress}. Skipping update.`);
+                return;
+            }
+        }
+
+        const multicallPoolContract = new MulticallContract(poolAddress, IUniswapV3PoolABI.abi as any);
+        const minWord = this._tickToWord(TickMath.MIN_TICK, tickSpacing);
+        const maxWord = this._tickToWord(TickMath.MAX_TICK, tickSpacing);
+        const BATCH_SIZE = 700;
+        const tickIndicesToFetch: number[] = [];
+        const wordPositions: number[] = [];
+        for (let i = minWord; i <= maxWord; i++) { wordPositions.push(i); }
+
+        let allBitmapResults: ethers.utils.Result[] = [];
         for (let i = 0; i < wordPositions.length; i += BATCH_SIZE) {
             const batchWordPositions = wordPositions.slice(i, i + BATCH_SIZE);
             const bitmapCalls = batchWordPositions.map(pos => multicallPoolContract.tickBitmap(pos));
-            this.logger.info(`Pool ${poolAddress} | Fee ${FeeAmount[feeForLogging]} | Executing multicall for bitmap batch ${i/BATCH_SIZE + 1}/${Math.ceil(wordPositions.length/BATCH_SIZE)} (size ${bitmapCalls.length})`);
-            const batchResults = await this.multicallProvider.all(bitmapCalls);
-            allBitmapResults = allBitmapResults.concat(batchResults);
+            allBitmapResults = allBitmapResults.concat(await this.multicallProvider.all(bitmapCalls));
         }
-        this.logger.info(`Pool ${poolAddress} | Fee ${FeeAmount[feeForLogging]} | Received all ${allBitmapResults.length} bitmap results from ${Math.ceil(wordPositions.length/BATCH_SIZE)} batches.`);
 
         for (let i = 0; i < allBitmapResults.length; i++) {
-            const bitmapWordIndex = wordPositions[i]; // Use original word position from the pre-batched list
+            const bitmapWordIndex = wordPositions[i];
             const bitmap = JSBI.BigInt(allBitmapResults[i].toString());
             if (JSBI.notEqual(bitmap, JSBI.BigInt(0))) {
                 for (let j = 0; j < 256; j++) {
@@ -184,53 +183,181 @@ export class UniswapService {
                 }
             }
         }
-    } catch (error: any) {
-      this.logger.error(`Pool ${poolAddress} | Fee ${FeeAmount[feeForLogging]} | Batched multicall for bitmaps failed: ${error.message}`, error.stack);
-      return []; 
-    }
+        tickIndicesToFetch.sort((a, b) => a - b);
 
-    // Batch fetch tick data for ALL tickIndicesToFetch
-    let allTickDataResults: ethers.utils.Result[] = [];
-    try {
+        if (tickIndicesToFetch.length === 0) {
+            this.logger.warn(`Background Updater: No initialized tick indices found from bitmaps for ${poolAddress}. Cache not updated.`);
+            return;
+        }
+
+        const allInitializedTicks: Tick[] = [];
+        let allTickDataResults: ethers.utils.Result[] = [];
         for (let i = 0; i < tickIndicesToFetch.length; i += BATCH_SIZE) {
             const batchTickIndices = tickIndicesToFetch.slice(i, i + BATCH_SIZE);
             const tickDataCalls = batchTickIndices.map(idx => multicallPoolContract.ticks(idx));
-            this.logger.info(`Pool ${poolAddress} | Fee ${FeeAmount[feeForLogging]} | Executing multicall for tick data batch ${Math.floor(i/BATCH_SIZE) + 1}/${Math.ceil(tickIndicesToFetch.length/BATCH_SIZE)} (size ${tickDataCalls.length})`);
-            const batchResults = await this.multicallProvider.all(tickDataCalls);
-            allTickDataResults = allTickDataResults.concat(batchResults);
+            allTickDataResults = allTickDataResults.concat(await this.multicallProvider.all(tickDataCalls));
         }
-        this.logger.info(`Pool ${poolAddress} | Fee ${FeeAmount[feeForLogging]} | Received all ${allTickDataResults.length} tick data results from ${Math.ceil(tickIndicesToFetch.length/BATCH_SIZE)} batches.`);
 
         for (let i = 0; i < allTickDataResults.length; i++) {
-            const tickIndex = tickIndicesToFetch[i]; 
+            const tickIndex = tickIndicesToFetch[i];
             const tickData = allTickDataResults[i];
-            allInitializedTicks.push(
-                new Tick({
-                    index: tickIndex,
-                    liquidityGross: JSBI.BigInt(tickData.liquidityGross.toString()),
-                    liquidityNet: JSBI.BigInt(tickData.liquidityNet.toString()),
-                }),
-            );
+            allInitializedTicks.push(new Tick({ index: tickIndex, liquidityGross: JSBI.BigInt(tickData.liquidityGross.toString()), liquidityNet: JSBI.BigInt(tickData.liquidityNet.toString()) }));
         }
-    } catch (error: any) {
-      this.logger.error(`Pool ${poolAddress} | Fee ${FeeAmount[feeForLogging]} | Batched multicall for tick details failed: ${error.message}`, error.stack);
-      // Depending on requirements, we might return partially fetched ticks or empty
-      // For now, if any batch fails, we return empty to ensure data integrity for the Pool constructor.
-      return []; 
-    }
 
-    if (allInitializedTicks.length > 0) { // Only cache if we actually got some ticks
-        this.tickCache.set(cacheKey, { data: allInitializedTicks, timestamp: Date.now() });
-        this.logger.info(`Pool ${poolAddress} | Fee ${FeeAmount[feeForLogging]} | Successfully fetched and cached ${allInitializedTicks.length} ticks.`);
-    } else {
-        // If no ticks were found, we might not want to cache an empty result aggressively,
-        // or we might cache it with a shorter TTL if it implies the pool is genuinely empty.
-        // For now, just log if it was an empty result after fetching.
-        this.logger.warn(`Pool ${poolAddress} | Fee ${FeeAmount[feeForLogging]} | No initialized ticks found after full fetch. Result not cached.`);
+        if (allInitializedTicks.length > 0) {
+            this.tickCache.set(poolAddress, { data: allInitializedTicks, timestamp: Date.now() });
+            this.logger.info(`Background Updater: Successfully refreshed and cached ${allInitializedTicks.length} ticks for pool ${poolAddress}.`);
+        } else {
+            this.logger.warn(`Background Updater: No ticks found after detail fetch for ${poolAddress}. Cache not updated.`);
+        }
+
+    } catch (error: any) {
+        this.logger.error(`Background Updater: Error refreshing tick data for pool ${poolAddress}: ${error.message}`, error.stack);
     }
-    return allInitializedTicks;
   }
 
+  public startBackgroundTickUpdater(updateIntervalMs: number = DEFAULT_BACKGROUND_UPDATE_INTERVAL_MS): void {
+    if (this.isBackgroundUpdaterRunning) {
+        this.logger.warn('Background tick updater is already running.');
+        return;
+    }
+    this.backgroundUpdaterAbortController = new AbortController();
+    const signal = this.backgroundUpdaterAbortController.signal;
+    this.isBackgroundUpdaterRunning = true;
+    this.logger.info(`Starting background tick updater. Update interval: ${updateIntervalMs / 1000}s`);
+
+    const worker = async () => {
+        while (!signal.aborted) {
+            this.logger.info('Background Updater: Starting tick update cycle.');
+            for (const poolInfo of this.poolsToUpdateInBackground) {
+                if (signal.aborted) break;
+                await this._refreshTickDataForPool(poolInfo.address, poolInfo.tickSpacing, poolInfo.fee);
+            }
+            if (signal.aborted) break;
+            this.logger.info(`Background Updater: Tick update cycle complete. Waiting for ${updateIntervalMs / 1000}s.`);
+            try {
+                await new Promise(resolve => setTimeout(resolve, updateIntervalMs, { signal } as any)); // Pass signal to setTimeout if supported/needed for interruption
+            } catch (error:any) { // Catch if AbortError from setTimeout signal
+                 if (error.name === 'AbortError') {
+                    this.logger.info('Background Updater: Wait aborted.');
+                    break;
+                 }
+                 // other errors during wait?
+            }
+        }
+        this.logger.info('Background tick updater stopped.');
+        this.isBackgroundUpdaterRunning = false;
+    };
+
+    worker().catch(error => {
+        this.logger.error('Background tick updater worker encountered an unhandled error:', error);
+        this.isBackgroundUpdaterRunning = false; // Ensure flag is reset
+    });
+  }
+
+  public stopBackgroundTickUpdater(): void {
+    if (this.backgroundUpdaterAbortController) {
+        this.logger.info('Stopping background tick updater...');
+        this.backgroundUpdaterAbortController.abort();
+        this.backgroundUpdaterAbortController = null;
+    }
+  }
+
+  // This is the primary method called by getBestV3TradeExactIn
+  private async _fetchAllInitializedTicks(
+    poolAddress: string, 
+    tickSpacing: number,
+    feeForLogging: FeeAmount
+  ): Promise<Tick[]> {
+    const cacheKey = poolAddress;
+    const cachedEntry = this.tickCache.get(cacheKey);
+
+    // With proactive caching, TTL is less important here, but we check freshness for initial calls 
+    // or if the background worker is slower than the request rate.
+    // A very short effective TTL or just checking for existence might be enough.
+    const REASONABLE_STALENESS_MS = DEFAULT_BACKGROUND_UPDATE_INTERVAL_MS * 2; // e.g., allow data to be twice the update interval old
+
+    if (cachedEntry && (Date.now() - cachedEntry.timestamp < REASONABLE_STALENESS_MS)) {
+        this.logger.info(`Pool ${poolAddress} | Fee ${FeeAmount[feeForLogging]} | Cache HIT (Proactive Cache) for tick data. Age: ${((Date.now() - cachedEntry.timestamp)/1000).toFixed(1)}s.`);
+        return cachedEntry.data;
+    }
+
+    if (cachedEntry) {
+        this.logger.warn(`Pool ${poolAddress} | Fee ${FeeAmount[feeForLogging]} | Proactive cache data is STALE or worker hasn't run recently. Age: ${((Date.now() - cachedEntry.timestamp)/1000).toFixed(1)}s. Performing on-demand fetch.`);
+    } else {
+        this.logger.warn(`Pool ${poolAddress} | Fee ${FeeAmount[feeForLogging]} | Cache MISS (Proactive Cache). Performing on-demand fetch.`);
+    }
+    
+    // On-demand fetch logic (same as _refreshTickDataForPool's core but returns data and caches)
+    // This ensures data is available even if the background worker hasn't run yet or is delayed.
+    this.logger.info(`Pool ${poolAddress} | Fee ${FeeAmount[feeForLogging]} | On-demand: Fetching ALL initialized ticks using batched multicall...`);
+    // ... (Duplicating the core fetching logic from _refreshTickDataForPool here) ...
+    // This is not ideal. Let's refactor to have a single core fetching method.
+    // For now, this will be a direct copy-paste of the fetching part from _refreshTickDataForPool
+    // and then it will cache and return.
+
+    // --- BEGIN Inlined Fetch Logic for On-Demand --- 
+    if (!this.multicallProvider) {
+        await this._initializeMulticallProvider();
+        if (!this.multicallProvider) { return []; }
+    }
+    const multicallPoolContract = new MulticallContract(poolAddress, IUniswapV3PoolABI.abi as any);
+    const allInitializedTicksInternal: Tick[] = [];
+    const minWord = this._tickToWord(TickMath.MIN_TICK, tickSpacing);
+    const maxWord = this._tickToWord(TickMath.MAX_TICK, tickSpacing);
+    const BATCH_SIZE = 700;
+    const tickIndicesToFetchInternal: number[] = [];
+    const wordPositionsInternal: number[] = [];
+    for (let i = minWord; i <= maxWord; i++) { wordPositionsInternal.push(i); }
+    let allBitmapResultsInternal: ethers.utils.Result[] = [];
+    try {
+        for (let i = 0; i < wordPositionsInternal.length; i += BATCH_SIZE) {
+            const batchWordPositions = wordPositionsInternal.slice(i, i + BATCH_SIZE);
+            const bitmapCalls = batchWordPositions.map(pos => multicallPoolContract.tickBitmap(pos));
+            allBitmapResultsInternal = allBitmapResultsInternal.concat(await this.multicallProvider.all(bitmapCalls));
+        }
+        for (let i = 0; i < allBitmapResultsInternal.length; i++) {
+            const bitmapWordIndex = wordPositionsInternal[i];
+            const bitmap = JSBI.BigInt(allBitmapResultsInternal[i].toString());
+            if (JSBI.notEqual(bitmap, JSBI.BigInt(0))) {
+                for (let j = 0; j < 256; j++) {
+                    const bit = JSBI.leftShift(JSBI.BigInt(1), JSBI.BigInt(j));
+                    if (JSBI.notEqual(JSBI.bitwiseAnd(bitmap, bit), JSBI.BigInt(0))) {
+                        const tickIndex = (bitmapWordIndex * 256 + j) * tickSpacing;
+                        if (tickIndex >= TickMath.MIN_TICK && tickIndex <= TickMath.MAX_TICK) {
+                            tickIndicesToFetchInternal.push(tickIndex);
+                        }
+                    }
+                }
+            }
+        }
+    } catch (e:any) { this.logger.error(`On-demand bitmap fetch error for ${poolAddress}: ${e.message}`); return []; }
+    tickIndicesToFetchInternal.sort((a, b) => a - b);
+    if (tickIndicesToFetchInternal.length === 0) { this.logger.warn(`On-demand: No ticks for ${poolAddress}`); return []; }
+    let allTickDataResultsInternal: ethers.utils.Result[] = [];
+    try {
+        for (let i = 0; i < tickIndicesToFetchInternal.length; i += BATCH_SIZE) {
+            const batchTickIndices = tickIndicesToFetchInternal.slice(i, i + BATCH_SIZE);
+            const tickDataCalls = batchTickIndices.map(idx => multicallPoolContract.ticks(idx));
+            allTickDataResultsInternal = allTickDataResultsInternal.concat(await this.multicallProvider.all(tickDataCalls));
+        }
+        for (let i = 0; i < allTickDataResultsInternal.length; i++) {
+            const tickIndex = tickIndicesToFetchInternal[i];
+            const tickData = allTickDataResultsInternal[i];
+            allInitializedTicksInternal.push(new Tick({ index: tickIndex, liquidityGross: JSBI.BigInt(tickData.liquidityGross.toString()), liquidityNet: JSBI.BigInt(tickData.liquidityNet.toString()) }));
+        }
+    } catch (e:any) { this.logger.error(`On-demand tick data fetch error for ${poolAddress}: ${e.message}`); return []; }
+    // --- END Inlined Fetch Logic for On-Demand ---
+
+    if (allInitializedTicksInternal.length > 0) {
+        this.tickCache.set(cacheKey, { data: allInitializedTicksInternal, timestamp: Date.now() });
+        this.logger.info(`Pool ${poolAddress} | Fee ${FeeAmount[feeForLogging]} | On-demand: Successfully fetched and cached ${allInitializedTicksInternal.length} ticks.`);
+        return allInitializedTicksInternal;
+    } else {
+        this.logger.warn(`Pool ${poolAddress} | Fee ${FeeAmount[feeForLogging]} | On-demand: No initialized ticks found. Result not cached.`);
+        return [];
+    }
+  }
 
   public async getBestV3TradeExactIn(
     tokenIn: Token,
@@ -422,3 +549,4 @@ export class UniswapService {
     }
   }
 }
+
