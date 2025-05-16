@@ -226,6 +226,96 @@ Awaiting Planner guidance or proceed to implement.
 ### README Update (Executor) - 2025-05-16
 The `README.md` has been updated with comprehensive information about the project, including setup, how it works, technology stack, testing, and risk disclaimers. Please review the updated `README.md`.
 
+### Uniswap Pricing Issue (Executor) - 2025-05-16
+The bot is currently unable to fetch prices from Uniswap for USDC/USDT. The logs show:
+`[WARN] [src/services/price-service.ts:150] Could not get Uniswap quote for USDC -> USDT: Invariant failed: ZERO_NET`
+This suggests a problem with the Uniswap V3 pool for USDC/USDT on Arbitrum, possibly related to incorrect token addresses, fee tier, or lack of liquidity.
+Investigation into `src/services/price-service.ts` and `src/services/uniswap-service.ts` is needed.
+
+**Analysis (Executor) - 2025-05-16**
+After reviewing `price-service.ts` and `uniswap-service.ts`:
+- Token addresses for USDC (0xaf88...) and USDT (0xfd08...) on Arbitrum Mainnet (Chain ID 42161) seem correct and are dynamically confirmed for USDT via Maya.
+- The Uniswap V3 SDK is used to find the best trade by iterating through LOWEST (0.01%), LOW (0.05%), and MEDIUM (0.3%) fee tiers.
+- The `getPoolInfoAndTicks` function in `uniswap-service.ts` currently provides only the *single active tick* to the `TickListDataProvider`.
+- The "Invariant failed: ZERO_NET" error from the Uniswap SDK likely occurs because `Trade.fromRoute` requires a window of surrounding tick data, not just the active tick, to properly simulate the swap, especially if the active tick has zero net liquidity or the swap crosses ticks.
+
+**Hypothesis:** The `TickListDataProvider` is not being supplied with sufficient tick data for the Uniswap SDK to calculate the trade path, leading to the ZERO_NET error.
+
+**Next Step:** Modify `uniswap-service.ts` to fetch a broader range of ticks for the `TickListDataProvider` or investigate if the specific USDC/USDT pool exists and has liquidity on the attempted fee tiers.
+
+**Log Analysis (Executor) - 2025-05-16 (after detailed logging)**
+The detailed logs from `uniswap-service.ts` revealed the following:
+- **Fee LOWEST (0.01%, tickSpacing 1, Pool `0xbE3...`)**:
+    - Pool and active tick (-3) data are fetched successfully, with positive net liquidity.
+    - `ERROR during Pool construction: Invariant failed: ZERO_NET` occurs.
+    - Stack trace points to `TickListDataProvider.validateList` / `new TickListDataProvider`. This suggests that providing only the single active tick, even if liquid, is insufficient for the SDK's internal validation or subsequent `Pool` logic, likely requiring a broader view of the tick landscape as per Uniswap's documentation on fetching full pool data.
+- **Fee LOW (0.05%, tickSpacing 10, Pool `0xbcE...`)**:
+    - `slot0.tick` is -1. Active tick details show 0 gross/net liquidity.
+    - `ERROR during Pool construction: Invariant failed: TICK_SPACING` occurs.
+    - The error is because the provided tick index (-1) is not divisible by the `tickSpacing` (10), which is a requirement for ticks passed to `TickListDataProvider`.
+- **Fee MEDIUM (0.3%, tickSpacing 60, Pool `0x995...`)**:
+    - `slot0.tick` is 16. Active tick details show 0 gross/net liquidity.
+    - `ERROR during Pool construction: Invariant failed: TICK_SPACING` occurs.
+    - Similar to the LOW fee tier, the tick index (16) is not divisible by `tickSpacing` (60).
+
+**Root Causes:**
+1.  **`ZERO_NET` (LOWEST Fee Tier):** Likely due to `TickListDataProvider` receiving only a single tick. The SDK expects a more complete set of initialized ticks to accurately model the pool's liquidity profile, as highlighted in Uniswap's "Fetching Pool Data" guide.
+2.  **`TICK_SPACING` (LOW & MEDIUM Fee Tiers):** The `slot0.tick` (current market tick) is being directly used as the index for the single tick provided to `TickListDataProvider`. However, this provider expects tick indices that are multiples of the pool's `tickSpacing`. `slot0.tick` often doesn't meet this criterion.
+
+**Solution Path & Next Steps:**
+1.  **Implement Full Tick Fetching:** The most robust solution is to modify `uniswap-service.ts` to fetch *all* initialized ticks for a given pool, as detailed in the Uniswap SDK documentation ("Fetching Pool Data" guide - [https://docs.uniswap.org/sdk/v3/guides/advanced/pool-data](https://docs.uniswap.org/sdk/v3/guides/advanced/pool-data)). This involves:
+    a. Calculating bitmap word positions.
+    b. Fetching all bitmaps (ideally using multicall).
+    c. Deriving all initialized tick indices from these bitmaps.
+    d. Fetching the `liquidityGross` and `liquidityNet` for each initialized tick (ideally using multicall).
+    e. Constructing `Tick` objects for all initialized ticks.
+    f. Passing this complete list of `Tick` objects to `TickListDataProvider` when creating the `Pool` instance.
+2.  This will resolve both the `ZERO_NET` (by providing sufficient context) and `TICK_SPACING` (by only using valid, initialized tick indices) errors.
+3.  The current `getPoolInfoAndTicks` needs to be significantly refactored or replaced to support this.
+
+Awaiting user confirmation to proceed with implementing the full tick fetching mechanism. This is a more substantial code change.
+
+**Update (Executor) - 2025-05-16: Batched Multicall Implementation**
+Implemented batching for multicall requests within `_fetchAllInitializedTicks` in `uniswap-service.ts` (using `BATCH_SIZE = 200`).
+- **Success:** All fee tiers, including the `LOWEST` (0.01%) tier for the highly active USDC/USDT pool, now successfully fetch all initialized ticks, construct the `Pool` object, and allow for trade simulation.
+- The previous `CALL_EXCEPTION` on the LOWEST tier due to oversized multicall requests is resolved.
+- The bot now correctly identifies the best price across the attempted fee tiers.
+
+**Update (Executor) - 2025-05-16: Optimal Batch Size & Single Fee Tier**
+1.  The `batchSizeOptimizer.ts` script was run, and an optimal `BATCH_SIZE` of **700** was determined for the QuikNode RPC provider with the USDC/USDT 0.01% pool.
+2.  `uniswap-service.ts` has been updated to use this `BATCH_SIZE = 700`.
+3.  `uniswap-service.ts` has been modified so `getBestV3TradeExactIn` now only queries the `FeeAmount.LOWEST` tier, as requested, to improve speed.
+
+**Update (Executor) - 2025-05-16: Selective Tick Fetching Attempt & Reversion**
+- Attempted to implement selective tick fetching (50% of ticks around `slot0.tick`) to further improve speed.
+- This led to `Invariant failed: ZERO_NET` errors from the Uniswap SDK's `TickListDataProvider`, indicating that providing a partial set of ticks, even a large one, can violate SDK invariants.
+- The selective tick fetching logic was reverted. `_fetchAllInitializedTicks` now robustly fetches all initialized ticks for the required fee tier, using the optimized batch size.
+
+**Update (Executor) - 2025-05-16: In-Memory Tick Cache Implementation**
+- Implemented an in-memory cache (`tickCache` with a `CACHE_TTL_MS` of 5 minutes) within `UniswapService`.
+- `_fetchAllInitializedTicks` now checks this cache before fetching. If a valid, non-stale entry for a pool exists, the cached tick data is used, significantly speeding up subsequent calls for the same pool within the TTL.
+- Initial fetch for USDC/USDT 0.01% pool takes ~5.7 seconds; subsequent calls within 5 mins for this pool will use cached data for ticks.
+
+**Summary of Optimizations Applied (User Plan Points 0, 1, 3, 4):**
+-   **RPC Provider**: Confirmed usage of user-provided QuikNode URL from `.env`.
+-   **Optimal Batch Size**: Determined as 700 and applied in `uniswap-service.ts`.
+-   **Single Fee Tier**: `UniswapService` now exclusively checks `FeeAmount.LOWEST`.
+-   **Tick Data Caching**: In-memory cache for fetched tick data is active.
+-   **Selective Tick Fetching (Point 2)**: Attempted but deemed unreliable with current SDK behavior; reverted to full (batched) tick fetching for robustness.
+
+**Performance Status:**
+- Uniswap data fetching is now robust and significantly faster.
+- First fetch for a complex pool (USDC/USDT 0.01%) is ~5-6 seconds.
+- Subsequent fetches for the same pool (within cache TTL) are very fast for the tick data portion.
+
+For now, the core pricing functionality is working correctly. Further speed optimizations depend on the specific latency requirements and willingness to explore external services or more complex caching.
+
+**Current Task: Implement Selective Tick Fetching (Point 2 from user plan)**
+- Modify `_fetchAllInitializedTicks` to support fetching a configurable percentage of initialized ticks around `slot0.tick`.
+- Initial target: 50% of ticks.
+- This will still require fetching all bitmaps first to know where all initialized ticks are.
+- The goal is to reduce the number of `multicallPoolContract.ticks()` calls while maintaining sufficient data for accurate pricing.
+
 ## 6. Lessons
 *(To be filled as lessons are learned during development)*
 *   Consider using `ethers.js` version 5 if Uniswap V3 SDK examples are based on it, or ensure compatibility with v6.

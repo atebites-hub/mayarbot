@@ -1,0 +1,213 @@
+console.log('[Optimizer Script] Top of file reached.'); // New top-level log
+
+import { ethers } from 'ethers';
+import { Token } from '@uniswap/sdk-core';
+import { Pool, Tick, FeeAmount, TickMath } from '@uniswap/v3-sdk';
+import JSBI from 'jsbi';
+import IUniswapV3PoolABI from '@uniswap/v3-core/artifacts/contracts/interfaces/IUniswapV3Pool.sol/IUniswapV3Pool.json';
+import { Contract as MulticallContract, Provider as MulticallProvider } from 'ethers-multicall';
+import config from '../../config/default'; 
+import { setupLogger, Logger } from './logger'; // Import setupLogger and the Logger interface
+
+const ARBITRUM_ONE_CHAIN_ID = 42161;
+const UNISWAP_V3_FACTORY_ADDRESS_ARBITRUM = '0x1F98431c8aD98523631AE4a59f267346ea31F984'; // Added constant
+
+// --- Re-usable helper from UniswapService (or make it a shared util) ---
+function feeToTickSpacing(feeAmount: FeeAmount): number {
+    switch (feeAmount) {
+        case FeeAmount.LOWEST: return 1;
+        case FeeAmount.LOW: return 10;
+        case FeeAmount.MEDIUM: return 60;
+        case FeeAmount.HIGH: return 200;
+        default: throw new Error(`Unknown fee amount: ${feeAmount}`);
+    }
+}
+
+function _tickToWord(tick: number, tickSpacing: number): number {
+    let compressed = Math.floor(tick / tickSpacing);
+    if (tick < 0 && tick % tickSpacing !== 0) {
+        compressed -= 1;
+    }
+    return compressed >> 8;
+}
+// --- End Re-usable helper ---
+
+async function timeBitmapFetching(
+    poolAddress: string,
+    tickSpacing: number,
+    batchSize: number,
+    multicallProvider: MulticallProvider,
+    logger: Logger // Logger interface type
+): Promise<{ durationMs: number; tickIndices: number[] }> {
+    const multicallPoolContract = new MulticallContract(poolAddress, IUniswapV3PoolABI.abi as any);
+    const minWord = _tickToWord(TickMath.MIN_TICK, tickSpacing);
+    const maxWord = _tickToWord(TickMath.MAX_TICK, tickSpacing);
+    const tickIndicesToFetch: number[] = [];
+
+    const wordPositions: number[] = [];
+    for (let i = minWord; i <= maxWord; i++) {
+        wordPositions.push(i);
+    }
+
+    logger.info(`[BitmapTimer Batch ${batchSize}] Word range: ${minWord} to ${maxWord} (${wordPositions.length} words).`);
+    const startTime = Date.now();
+    let allBitmapResults: ethers.utils.Result[] = [];
+
+    try {
+        for (let i = 0; i < wordPositions.length; i += batchSize) {
+            const batchWordPositions = wordPositions.slice(i, i + batchSize);
+            const bitmapCalls = batchWordPositions.map(pos => multicallPoolContract.tickBitmap(pos));
+            logger.debug(`[BitmapTimer Batch ${batchSize}] Executing multicall for bitmap batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(wordPositions.length/batchSize)} (size ${bitmapCalls.length})`);
+            const batchResults = await multicallProvider.all(bitmapCalls);
+            allBitmapResults = allBitmapResults.concat(batchResults);
+        }
+
+        for (let i = 0; i < allBitmapResults.length; i++) {
+            const bitmapWordIndex = wordPositions[i];
+            const bitmap = JSBI.BigInt(allBitmapResults[i].toString());
+            if (JSBI.notEqual(bitmap, JSBI.BigInt(0))) {
+                for (let j = 0; j < 256; j++) {
+                    const bit = JSBI.leftShift(JSBI.BigInt(1), JSBI.BigInt(j));
+                    if (JSBI.notEqual(JSBI.bitwiseAnd(bitmap, bit), JSBI.BigInt(0))) {
+                        const tickIndex = (bitmapWordIndex * 256 + j) * tickSpacing;
+                        if (tickIndex >= TickMath.MIN_TICK && tickIndex <= TickMath.MAX_TICK) {
+                            tickIndicesToFetch.push(tickIndex);
+                        }
+                    }
+                }
+            }
+        }
+    } catch (error: any) {
+        logger.error(`[BitmapTimer Batch ${batchSize}] Batched multicall for bitmaps failed: ${error.message}`);
+        throw error;
+    }
+    const durationMs = Date.now() - startTime;
+    logger.info(`[BitmapTimer Batch ${batchSize}] Found ${tickIndicesToFetch.length} tick indices. Duration: ${durationMs}ms`);
+    tickIndicesToFetch.sort((a,b) => a - b); 
+    return { durationMs, tickIndices: tickIndicesToFetch };
+}
+
+async function timeTickDataFetching(
+    poolAddress: string,
+    tickIndices: number[],
+    batchSize: number,
+    multicallProvider: MulticallProvider,
+    logger: Logger // Logger interface type
+): Promise<{ durationMs: number; fetchedTicksCount: number }> {
+    if (tickIndices.length === 0) {
+        return { durationMs: 0, fetchedTicksCount: 0 };
+    }
+    const multicallPoolContract = new MulticallContract(poolAddress, IUniswapV3PoolABI.abi as any);
+    let fetchedTicksCount = 0;
+
+    logger.info(`[TickDataTimer Batch ${batchSize}] Fetching details for ${tickIndices.length} ticks.`);
+    const startTime = Date.now();
+
+    try {
+        for (let i = 0; i < tickIndices.length; i += batchSize) {
+            const batchTickIndices = tickIndices.slice(i, i + batchSize);
+            const tickDataCalls = batchTickIndices.map(idx => multicallPoolContract.ticks(idx));
+            logger.debug(`[TickDataTimer Batch ${batchSize}] Executing multicall for tick data batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(tickIndices.length/batchSize)} (size ${tickDataCalls.length})`);
+            const batchResults = await multicallProvider.all(tickDataCalls);
+            fetchedTicksCount += batchResults.length;
+        }
+    } catch (error: any) {
+        logger.error(`[TickDataTimer Batch ${batchSize}] Batched multicall for tick details failed: ${error.message}`);
+        throw error;
+    }
+    const durationMs = Date.now() - startTime;
+    logger.info(`[TickDataTimer Batch ${batchSize}] Fetched data for ${fetchedTicksCount} ticks. Duration: ${durationMs}ms`);
+    return { durationMs, fetchedTicksCount };
+}
+
+export async function findOptimalBatchSize() {
+    // Use the setupLogger function to get a logger instance
+    const logger: Logger = setupLogger(); 
+    logger.info('Starting Batch Size Optimization Test...');
+
+    const provider = new ethers.providers.JsonRpcProvider(config.arbitrum.rpcUrl);
+    const network = await provider.getNetwork();
+    const multicallProvider = new MulticallProvider(provider, network.chainId);
+
+    const USDC_ARB_ADDRESS = '0xaf88d065e77c8cC2239327C5EDb3A432268e5831';
+    const USDT_ARB_ADDRESS = '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9';
+    const targetFee = FeeAmount.LOWEST;
+
+    const TOKEN0 = new Token(ARBITRUM_ONE_CHAIN_ID, USDC_ARB_ADDRESS, 6, 'USDC', 'USD Coin');
+    const TOKEN1 = new Token(ARBITRUM_ONE_CHAIN_ID, USDT_ARB_ADDRESS, 6, 'USDT', 'Tether USD');
+
+    const poolAddress = Pool.getAddress(TOKEN0, TOKEN1, targetFee, undefined, UNISWAP_V3_FACTORY_ADDRESS_ARBITRUM);
+    const tickSpacing = feeToTickSpacing(targetFee);
+
+    logger.info(`Target Pool: USDC/USDT 0.01% (TickSpacing: ${tickSpacing})`);
+    logger.info(`Pool Address: ${poolAddress}`);
+
+    const batchSizesToTest = [50, 100, 150, 200, 250, 300, 400, 500, 600, 700];
+    const results: Array<{ batchSize: number; bitmapTimeMs: number; tickDataTimeMs: number; totalTimeMs: number; tickCount: number }> = [];
+    const iterationsPerBatchSize = 3;
+
+    for (const batchSize of batchSizesToTest) {
+        logger.info(`--- Testing Batch Size: ${batchSize} ---`);
+        let totalBitmapTime = 0;
+        let totalTickDataTime = 0;
+        let lastTickCount = 0;
+
+        try {
+            for (let i = 0; i < iterationsPerBatchSize; i++) {
+                logger.info(`Iteration ${i + 1}/${iterationsPerBatchSize} for batch size ${batchSize}`);
+                const bitmapResult = await timeBitmapFetching(poolAddress, tickSpacing, batchSize, multicallProvider, logger);
+                totalBitmapTime += bitmapResult.durationMs;
+                lastTickCount = bitmapResult.tickIndices.length;
+
+                if (bitmapResult.tickIndices.length > 0) {
+                    const tickDataResult = await timeTickDataFetching(poolAddress, bitmapResult.tickIndices, batchSize, multicallProvider, logger);
+                    totalTickDataTime += tickDataResult.durationMs;
+                } else {
+                    logger.warn(`Skipping tick data fetching for batch size ${batchSize}, iteration ${i+1} as no tick indices were found.`);
+                }
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+
+            const avgBitmapTime = totalBitmapTime / iterationsPerBatchSize;
+            const avgTickDataTime = totalTickDataTime / iterationsPerBatchSize;
+            results.push({
+                batchSize,
+                bitmapTimeMs: parseFloat(avgBitmapTime.toFixed(2)),
+                tickDataTimeMs: parseFloat(avgTickDataTime.toFixed(2)),
+                totalTimeMs: parseFloat((avgBitmapTime + avgTickDataTime).toFixed(2)),
+                tickCount: lastTickCount
+            });
+        } catch (error) {
+            logger.error(`Error during test for batch size ${batchSize}: ${error}`);
+            results.push({
+                batchSize,
+                bitmapTimeMs: -1, 
+                tickDataTimeMs: -1,
+                totalTimeMs: -1,
+                tickCount: 0
+            });
+        }
+        await new Promise(resolve => setTimeout(resolve, 2000)); 
+    }
+
+    logger.info('--- Batch Size Optimization Results ---');
+    results.sort((a,b) => a.totalTimeMs - b.totalTimeMs);
+    results.forEach(res => {
+        logger.info(
+            `Batch Size: ${res.batchSize}, Bitmaps: ${res.bitmapTimeMs}ms, TickData: ${res.tickDataTimeMs}ms, Total: ${res.totalTimeMs}ms, Ticks Found: ${res.tickCount}`
+        );
+    });
+
+    if (results.length > 0 && results[0].totalTimeMs > 0) {
+        logger.info(`Optimal Batch Size based on this run: ${results[0].batchSize} (Total Time: ${results[0].totalTimeMs}ms)`);
+    } else {
+        logger.warn('Could not determine optimal batch size from this run due to errors or no successful tests.');
+    }
+}
+
+// Or setup a ts-node script in package.json like "optimize-batch": "ts-node src/utils/batchSizeOptimizer.ts"
+console.log('[Optimizer Script] About to call findOptimalBatchSize().'); // New log before call
+
+findOptimalBatchSize().catch(error => {
+    console.error("[Optimizer Script] CRITICAL FAILURE in findOptimalBatchSize:", error);
+}); 

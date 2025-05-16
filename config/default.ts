@@ -14,16 +14,19 @@ const config = {
     useStageNet: process.env.USE_STAGENET === 'true',
   },
   arbitrum: {
-    rpcUrl: process.env.ARBITRUM_RPC_URL || 'https://arbitrum-goerli.publicnode.com',
+    rpcUrl: process.env.ARBITRUM_RPC_URL || 'https://arb1.arbitrum.io/rpc',
     uniswapSubgraphId:
-      process.env.UNISWAP_SUBGRAPH_ID || 'FQ6JYszEKApsBpAmiHesRsd9Ygc6mzmpNRANeVQFYoVX', // Uniswap V3 Arbitrum One
+      process.env.UNISWAP_SUBGRAPH_ID || 'FQ6JYszEKApsBpAmiHesRsd9Ygc6mzmpNRANeVQFYoVX',
   },
   vultisig: {
     apiKey: process.env.VULTISIG_API_KEY || '',
     apiSecret: process.env.VULTISIG_API_SECRET || '',
   },
   bot: {
-    targetAssets: (process.env.TARGET_ASSETS || 'ARB,USDC').split(','),
+    targetAssets: (
+      process.env.TARGET_ASSETS ||
+      'ARB.USDC-0xaf88d065e77c8cC2239327C5EDb3A432268e5831'
+    ).split(','),
     minProfitThreshold: parseFloat(process.env.MIN_PROFIT_THRESHOLD || '1.5'),
     sleepTimeMs: parseInt(process.env.BOT_SLEEP_TIME_MS || '10000', 10),
   },

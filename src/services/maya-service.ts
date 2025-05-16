@@ -2,6 +2,7 @@ import axios from 'axios';
 import config from '../../config/default';
 import { MayaPool, MayaInboundAddress } from '../types';
 import { Logger } from '../utils/logger';
+import { ethers } from 'ethers';
 
 /**
  * Service class for interacting with the Maya Protocol APIs
@@ -64,6 +65,36 @@ export class MayaService {
       }
     }
     throw new Error(`Failed to fetch Maya pool data for ${asset} after ${maxRetries} retries`);
+  }
+
+  /**
+   * Fetches a swap quote from Mayanode
+   * @param fromAsset The asset to swap from (e.g., 'ARB.USDC-0xaf88d065e77c8cC2239327C5EDb3A432268e5831')
+   * @param toAsset The asset to swap to (e.g., 'MAYA.CACAO')
+   * @param amount The amount to swap, in base units of the fromAsset (e.g., 1 ARB USDC = 1000000 if 6 decimals)
+   * @returns Swap quote data
+   */
+  async getSwapQuote(fromAsset: string, toAsset: string, amount: number): Promise<any> {
+    const endpoint = `${this.nodeUrl}/quote/swap`;
+    const params = {
+      from_asset: fromAsset,
+      to_asset: toAsset,
+      amount: amount.toString(),
+      // Optional: streaming_interval, streaming_quantity, tolerance_bps can be added if needed
+    };
+
+    try {
+      this.logger.debug(`Fetching swap quote from ${fromAsset} to ${toAsset} for amount ${amount}`, params);
+      const response = await axios.get(endpoint, { params });
+      // The direct response.data is the quote object
+      // It includes fields like 'expected_amount_out', 'slippage_bps', 'fees', 'outbound_delay_seconds' etc.
+      return response.data;
+    } catch (error: any) {
+      this.logger.error(
+        `Failed to fetch swap quote for ${fromAsset} to ${toAsset}: ${error.response?.data?.error || (error instanceof Error ? error.message : String(error))}`
+      );
+      throw new Error(`Failed to fetch Maya swap quote for ${fromAsset} to ${toAsset}`);
+    }
   }
 
   /**
@@ -136,5 +167,51 @@ export class MayaService {
     // For this example, we're using a placeholder value
     // TODO: Implement real CACAO/USD price fetching
     return 0.05; // Placeholder value
+  }
+
+  /**
+   * Finds a specific asset string from Maya's pool list and extracts its contract address if applicable.
+   * @param targetChain The chain of the asset (e.g., 'ARB').
+   * @param targetSymbol The symbol of the asset (e.g., 'USDT').
+   * @returns An object { mayaAssetString: string, contractAddress: string | null } or null if not found.
+   */
+  async getMayaAssetDetails(
+    targetChain: string,
+    targetSymbol: string,
+  ): Promise<{ mayaAssetString: string; contractAddress: string | null } | null> {
+    this.logger.debug(`Searching for Maya asset details for ${targetChain}.${targetSymbol}`);
+    try {
+      const pools = await this.getPools(); // Assuming getPools is already implemented and works
+      const upperTargetChain = targetChain.toUpperCase();
+      const upperTargetSymbol = targetSymbol.toUpperCase();
+
+      for (const pool of pools) {
+        const assetParts = pool.asset.split('.');
+        if (assetParts.length < 2) continue;
+
+        const chain = assetParts[0];
+        const symbolAndContract = assetParts[1];
+
+        if (chain.toUpperCase() === upperTargetChain) {
+          const symbolParts = symbolAndContract.split('-');
+          const symbol = symbolParts[0];
+          
+          if (symbol.toUpperCase() === upperTargetSymbol) {
+            const contractAddress = symbolParts.length > 1 ? symbolParts[1] : null;
+            const mayaAssetString = pool.asset;
+            this.logger.info(`Found Maya asset: ${mayaAssetString} for ${targetChain}.${targetSymbol}`);
+            return {
+              mayaAssetString,
+              contractAddress: contractAddress ? ethers.utils.getAddress(contractAddress.toLowerCase()) : null,
+            };
+          }
+        }
+      }
+      this.logger.warn(`Maya asset ${targetChain}.${targetSymbol} not found in /pools endpoint.`);
+      return null;
+    } catch (error) {
+      this.logger.error(`Error fetching Maya asset details for ${targetChain}.${targetSymbol}: ${error}`);
+      return null;
+    }
   }
 } 
